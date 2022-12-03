@@ -610,7 +610,7 @@ And there, we've got our stack pointer! And we're no longer writing to the I/O
 memory space by mistake!
 
 ![The entire code executes to the idle loop without the LEDs or UART changing 
-state at all](step6_end.png)
+state at all](images/step6_end.png)
 
 Step 7: The Rest
 ----------------
