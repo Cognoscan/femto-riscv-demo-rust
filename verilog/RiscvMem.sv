@@ -1,5 +1,6 @@
 module RiscvMem #(
-    int MEM_DEPTH = 256
+    parameter INIT_FILE = "",
+    parameter int MEM_DEPTH = 1024
 )
 (
     input logic clk,
@@ -15,33 +16,37 @@ localparam MEM_IDX_W = $clog2(MEM_DEPTH);
 
 logic [31:0] mem [MEM_DEPTH];
 
-always @(posedge clk) begin
-    if (read) begin
-        rData <= mem[addr[2+:MEM_IDX_W]];
+// Byte reversal
+logic [31:0] memOut;
+logic [31:0] memIn;
+logic [3:0] strobeIn;
+always_comb for (int i=0; i<4; i++) rData[8*i+:8] = memOut[8*(3-i)+:8];
+always_comb for (int i=0; i<4; i++) memIn[8*(3-i)+:8] = wData[8*i+:8];
+always_comb for (int i=0; i<4; i++) strobeIn[3-i] = wStrb[i];
+
+if (INIT_FILE != "") begin
+    initial begin
+        $readmemh(INIT_FILE, mem);
+        /*
+        // Debug for checking the memory content
+        for (int i=0; i<MEM_DEPTH; i++) begin
+            if (i%4 == 0) $write("%4x: ", i<<2);
+            $write("%x ", mem[i]);
+            if (i%4 == 3) $write("\n");
+        end
+        */
     end
-    for (int i=0; i<4; i++) begin
-        if (wStrb[i]) mem[addr[2+:MEM_IDX_W]][8*i+:8] <= wData[8*i+:8];
-    end
-    if (!rstn) rData <= '0;
+end
+else begin
+    initial for (int i=0; i<MEM_DEPTH; i++) mem[i] = '0;
 end
 
-initial begin
-    // I probably shouldn't have to do it this way... but the "verilog" output 
-    // is byte-oriented and I need to arrange it like this. Unless I figure out 
-    // a different way for objcopy to declare the offsets correctly. Whatever.
-    automatic bit [7:0] memload [MEM_DEPTH*4];
-    $readmemh("prog.mem", memload);
-    for (int i=0; i<MEM_DEPTH*4; i+=4) begin
-        mem[i>>2] = {memload[i+3],memload[i+2],memload[i+1],memload[i]};
+always @(posedge clk) begin
+    // Write path
+    for (int i=0; i<4; i++) begin
+        if (strobeIn[i]) mem[addr[2+:MEM_IDX_W]][8*i+:8] <= memIn[8*i+:8];
     end
-    // Debug for checking the memory content
-    /*
-    for (int i=0; i<MEM_DEPTH; i++) begin
-        if (i%4 == 0) $write("%4x: ", i<<2);
-        $write("%x ", mem[i]);
-        if (i%4 == 3) $write("\n");
-    end
-    */
+    if (read) memOut <= mem[addr[2+:MEM_IDX_W]];
 end
 
 endmodule

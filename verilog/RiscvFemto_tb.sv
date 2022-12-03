@@ -19,7 +19,10 @@ wire isMem = !memAddr[22];
 always #1 clk = ~clk;
 
 RiscvFemto uut ( .* );
-RiscvMem #( 256 ) memory (
+RiscvMem #(
+    "../program.mem",
+    256
+) memory (
     .clk(clk),
     .rstn(rstn),
     .addr(memAddr),

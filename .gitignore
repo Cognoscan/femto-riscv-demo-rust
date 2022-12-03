@@ -1,1 +1,7 @@
 /target
+program*
+verilog/axsim.sh
+verilog/webtalk*
+verilog/xelab*
+verilog/xsim*
+verilog/xvlog*
