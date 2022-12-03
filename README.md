@@ -124,7 +124,7 @@ marked it as a C ABI-compatible function with `extern "C"`, and told Rust to not
 mess with the name by adding `#[no_mangle]`. Does it compile now? Yes! So let's 
 check the content using llvm-objdump and see what we've got:
 
-```
+```objdump
 llvm-objdump -h target/riscv32i-unknown-none-elf/release/femto-riscv-demo
 
 target/riscv32i-unknown-none-elf/release/femto-riscv-demo:      file format elf32-littleriscv
@@ -279,7 +279,7 @@ please."
 Ok, cool, linker script in, it should be used, and the start function has been 
 marked up. The build completes, let's look at the object file:
 
-```
+```objdump
 target/riscv32i-unknown-none-elf/release/femto-riscv-demo:      file format elf32-littleriscv
 
 Sections:
@@ -310,7 +310,7 @@ Idx Name                                                Size     VMA      Type
 Hey, look at that, a TEXT section! And it starts with `<_start>` if I look at 
 the disassembly with `-d`:
 
-```
+```objdump
 Disassembly of section .text:
 
 00000000 <_start>:
@@ -429,7 +429,7 @@ opt-level = "z"
 
 And when we re-run the compilation, lo, the code is small!
 
-```
+```objdump
 ./program:      file format elf32-littleriscv
 
 Disassembly of section .text:
@@ -491,7 +491,7 @@ We'll also make a fake section (under SECTIONS) for the stack, telling the
 linker to not load it. And finally, we'll add an ASSERT to make sure the stack 
 is big enough. The linker script should now look like this:
 
-```Linker Script
+```
 MEMORY
 {
 	BRAM (RWX) : ORIGIN = 0x0000, LENGTH = 1K  /* 1kiB RAM */
@@ -539,7 +539,7 @@ Shoot. Ok. `.eh_frame`. Ehhhh. It's some kind of "Exception Frame". I'm going to
 defer to the wizards who wrote `riscv-rt` on this one and grab their bit of 
 linker script to handle these shenanigans. At the end of SECTIONS, let's add:
 
-```Linker Script
+```
 .eh_frame (INFO) : { KEEP(*(.eh_frame)) }
 .eh_frame_hdr (INFO) : { *(.eh_frame_hdr) }
 ```
@@ -584,7 +584,7 @@ _start:
 
 And the disassembly?
 
-```
+```objdump
 ./program:      file format elf32-littleriscv
 
 Disassembly of section .text:
@@ -602,9 +602,20 @@ Nice. Now we replace that `ebreak` with loading the stack pointer and going to
 the start of the rust program:
 
 ```asm
-lla 
-``
+la sp, _stack_start
+jal _start_rust
+```
 
+And there, we've got our stack pointer! And we're no longer writing to the I/O 
+memory space by mistake!
+
+![The entire code executes to the idle loop without the LEDs or UART changing 
+state at all](step6_end.png)
+
+Step 7: The Rest
+----------------
+
+More to Come
 
 
 
