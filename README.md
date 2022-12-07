@@ -7,8 +7,9 @@ the GNU toolchain to compile programs - assembly". I looked ahead and saw the
 tutorial continues on to C, and thought, hey, why not Rust instead? And that's 
 what we're doing here: compiling Rust programs for an incredibly tiny, 
 incredibly simple RISC-V processor. So let's start! I'm using the small, poorly 
-written, possibly buggy RISC-V I had from the tutorial here for testing - feel 
-free to substitute your own.
+written, possibly buggy RISC-V I had from the tutorial (at step 20) here for 
+testing - feel free to substitute your own. It has no interrupts, shared 
+program/data memory (1 whole kiB), and has CSR instruction support.
 
 As a note, before we begin, I'm taking a lot of knowledge and code from the 
 [`riscv-rt`][riscv_rt] crate, which does everything I'm doing here and more 
@@ -566,10 +567,11 @@ Now let's add that assembly in! Here's the neat part about Rust 1.59 onward - we
 can just put in global assembly right in the code, no .S file or scripting 
 required. Just `global_asm!` and we're off to the races.
 
-Our assembly needs to declare the section it's in, that it's a global label, and 
-give our starting label. Then, to make sure we've got it in the right order, 
-I've stuck a `ebreak` instruction in there so we've got something to look for in 
-the compiled binary.
+Our assembly needs to declare the section it's in (with "ax" to say the section 
+is "allocatable" and "executable"), declare its global label, and give our 
+starting label. Then, to make sure we've got it in the right order, I've stuck a 
+`ebreak` instruction in there so we've got something to look for in the compiled 
+binary.
 
 ```rust
 use core::arch::global_asm;
@@ -612,15 +614,142 @@ memory space by mistake!
 ![The entire code executes to the idle loop without the LEDs or UART changing 
 state at all](images/step6_end.png)
 
-Step 7: The Rest
-----------------
+Ok, cool, stack pointer done. That's not the only thing we need to do as part of 
+initial configuration though...
 
-More to Come
+Step 7: Initializing the other registers
+----------------------------------------
+
+So, we saw the stack pointer, but really we should be initializing every 
+register in some way, if only to safely clear out whatever was in there before 
+the last reset. Going back to the [RISC-V Assembler's manual][asm-manual] we 
+see the full list of registers, named by their role in the RISC-V Application 
+Binary Interface (ABI):
+
+[asm-manual]" https://github.com/riscv-non-isa/riscv-asm-manual/blob/master/riscv-asm.md
+
+Register       | ABI         | Use by convention                         | Preserved?
+:--------      | :---------- | :---------------                          | ------
+x0             | zero        | hardwired to 0, ignores writes            | _n/a_
+x1             | ra          | return address for jumps                  | no
+x2             | sp          | stack pointer                             | yes
+x3             | gp          | global pointer                            | _n/a_
+x4             | tp          | thread pointer                            | _n/a_
+x5-x7, x28-x31 | t0-t6       | temporary registers 0-6                   | no
+x8             | s0 _or_ fp  | saved register 0 _or_ frame pointer       | yes
+x9, x18-x27    | s1-s11      | saved registers 1-11                      | yes
+x10-x11        | a0-a1       | return values _or_ function arguments 0-1 | no
+x12-x17        | a2-a7       | function arguments 2-7                    | no
+pc             | _(none)_    | program counter                           | _n/a_
+
+Let's initialize them all.
+
+- ra: easy, that'll get written once we hit the `jal _start_rust` instruction in 
+	our start routine, which loads the program counter into `ra` as part of the jump.
+- sp: We already did `sp`.
+- gp: This is...let's get back to this one in a bit.
+- tp: The thread pointer is for thread-local storage, and well, we're not doing 
+	that since we have no threads, so we can just set it to zero.
+- t0-t6: temporary registers, make 'em zero.
+- fp: The frame pointer starts off identical to the stack pointer. This is used 
+	for closures in Rust, so we want it even if we never do stack unwinding.
+- s1-s11: saved registers, start 'em off at zero.
+- a0-a7: function arguments, start 'em off at zero. As an aside, `riscv-rt` does 
+	not overwrite a0-a2 because they are initialized to specific values when a new 
+	hart starts up. a0 is the hart ID, and a1 is a value passed by the supervisor 
+	call that started the hart. a2... for some reason riscv-rt also provides this 
+	as a value, though the Supervisor Binary Interface (SBI) spec doesn't make a 
+	mention of it as part of the initialization state. Anyway, we're not doing 
+	multiple harts so we just set all of this to zero.
+
+So, amending our start function, we now have:
+
+```assembly
+    .section .init, "ax"
+    .global _start
+_start:
+    li tp, 0
+    li t0, 0
+    li t1, 0
+    li t2, 0
+    li t3, 0
+    li t4, 0
+    li t5, 0
+    li t6, 0
+    li s1, 0
+    li s2, 0
+    li s3, 0
+    li s4, 0
+    li s5, 0
+    li s6, 0
+    li s7, 0
+    li s8, 0
+    li s9, 0
+    li s10, 0
+    li s11, 0
+    li a0, 0
+    li a1, 0
+    li a2, 0
+    li a3, 0
+    li a4, 0
+    li a5, 0
+    li a6, 0
+    li a7, 0
+    la sp, _stack_start
+    mv fp, sp
+    jal _start_rust
+```
+
+Ok, now, what about that global pointer? Well, that points to the global 
+variables, and there are special rules about those. First, we need to make space 
+for these global variables, which means it's time to return once again to the 
+linker script. Between the code section and the stack section, we need to add 3 
+sections: `.data`, which will hold the global variables initialized to non-zero 
+values, `.bss`, which holds global variables that get initialized to zero, and 
+`.rodata`, which actually has nothing to do with either of those. `.rodata` is 
+just all the constants in the program, shoved in at the end after the code. This 
+seems like as good a time as any to add it in.
 
 
+Misc Notes
+----------
 
+RISC-V has lots of optional configuration features and such. How do we know if 
+we're on 32-bit or 64-bit, for instance? Or if we have the M feature set? Well, 
+we can mark up the code with the `#[cfg()]` attribute. For architecture, we 
+check like so:
 
+```rust
+#[cfg(target_arch = "riscv32")]
+global_asm!(r#"..."#);
 
+#[cfg(target_arch = "riscv64")]
+global_asm!(r#"..."#);
+```
 
+The compiler accepts RISC-V extensions as feature flags, like so:
 
+```toml
+rustflags = [
+  "-C", "target-feature=+m,+f"
+]
+```
+
+Unfortunately, it doesn't set these as feature flags that we can see inside 
+Rust code with `cfg`. So we either need to know what the features are, have them 
+set in a specific CSR, or we can check some of them by looking at the C 
+preprocessor defines (if we're inside an assembly code section):
+
+- `__riscv`: defined for any RISC-V target. Older versions of the GCC toolchain defined __riscv__.
+- `__riscv_xlen`: 32 for RV32 and 64 for RV64.
+- `__riscv_float_abi_soft, __riscv_float_abi_single, __riscv_float_abi_double`: one of these three will be defined, depending on target ABI.
+- `__riscv_cmodel_medlow, __riscv_cmodel_medany`: one of these two will be defined, depending on the target code model.
+- `__riscv_mul`: defined when targeting the 'M' ISA extension.
+- `__riscv_muldiv`: defined when targeting the 'M' ISA extension and -mno-div has not been used.
+- `__riscv_div`: defined when targeting the 'M' ISA extension and -mno-div has not been used.
+- `__riscv_atomic`: defined when targeting the 'A' ISA extension.
+- `__riscv_flen`: 32 when targeting the 'F' ISA extension (but not 'D') and 64 when targeting 'FD'.
+- `__riscv_fdiv`: defined when targeting the 'F' or 'D' ISA extensions and -mno-fdiv has not been used.
+- `__riscv_fsqrt`: defined when targeting the 'F' or 'D' ISA extensions and -mno-fdiv has not been used.
+- `__riscv_compressed`: defined when targeting the 'C' ISA extension.
 
