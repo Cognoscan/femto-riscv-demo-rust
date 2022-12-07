@@ -703,13 +703,153 @@ _start:
 Ok, now, what about that global pointer? Well, that points to the global 
 variables, and there are special rules about those. First, we need to make space 
 for these global variables, which means it's time to return once again to the 
-linker script. Between the code section and the stack section, we need to add 3 
-sections: `.data`, which will hold the global variables initialized to non-zero 
-values, `.bss`, which holds global variables that get initialized to zero, and 
-`.rodata`, which actually has nothing to do with either of those. `.rodata` is 
-just all the constants in the program, shoved in at the end after the code. This 
-seems like as good a time as any to add it in.
+linker script.
 
+Step 8: More linker script sections - `.rodata`, `.data`, `.bss`
+----------------------------------------------------------------
+
+Between the code section and the stack section, we need to add 3 sections: 
+`.data`, which will hold the initialized global variables,
+`.bss`, which holds global variables that are uninitialized (though we'll set them to 
+zero later), and `.rodata`, which actually has nothing to do with either of 
+those. `.rodata` is just all the constants in the program, shoved in at the end 
+after the code. This seems like as good a time as any to add it in.
+
+So, `.rodata` needs to be aligned to a 4-byte address like everything else, and 
+we need to include the `.rodata` sections from our various source files that get 
+fed into the linker. Like we did with `.text`, we put in a match rule: 
+`*(.rodata .rodata.*);` says to include any sections that are either called 
+`.rodata` or *start* with `.rodata`. This match rule can also be written out 
+separately, like `*(.rodata); *(.rodata.*);`, but this way we mark them all 
+together and let the linker know we don't care about how it orders them, just so 
+long as they show up here.
+
+So, we'll put that line that tells the linker to put those `.rodata` sections 
+into this section, and at the end we'll re-align to a 4-byte address again. This 
+final alignment is needed for somewhat arcane reasons - the next section we 
+have, `.data`, stores its initial data in one location (of hopefully read-only 
+memory), but loads it in another location.  The load location will only be 
+aligned if we do our re-alignment here. So, with all that in mind - align, 
+include sections, align again - we end up with:
+
+```
+.rodata : ALIGN(4)
+{
+  *(.rodata .rodata.*);
+  . = ALIGN(4);
+} > BRAM
+```
+
+Note how I've put it in the BRAM memory again, for now. At some point later on, 
+we'll change where these are located, and we'll do that by changing that last 
+little `> BRAM` bit.
+
+Now, for the `.data` section - the one holding all our initialized global 
+variables. This one is tricky. As mentioned before with the `.rodata` section, 
+this stores the initial data values in one location, and the loaded data values 
+in a different location. We inform the linker of this by changing the usual
+`> BRAM` at the end to be `> BRAM AT > BRAM`. If we were separating these into 
+read-only memory and the active read/write memory, we'd change this to something 
+like `> DATA_REGION AT > RODATA_REGION` - the first is the active read/write 
+region, and the second is the location to load initial values from, which is 
+generally put right after the `.rodata` in the same region that's located in.
+
+We also need to put in the end same matching rules like we did for `.rodata` and 
+`.text`. So far, that gives us:
+
+```
+.data : ALIGN
+{
+	*(.data .data.*);
+	*(.sdata .sdata.*);
+} > BRAM AT > BRAM
+```
+
+Are you wondering about `.sdata`? That's the "small data" section. For small 
+global values, we can reference them quicker by using the value in the global 
+pointer register and a single 12-bit signed offset. The rest of the globals take 
+2 instructions to reference - one to load the 20-bit upper immediate offset, one 
+to load the remaining 12-bit offset. *This* is where the global pointer comes 
+in: we need to point it in here somehow. The linker expects us do point it with 
+a special named variable, galled `__global_pointer$`, and we want to offset it 
+by 0x800 into the small data section so the 12-bit signed offset can point back 
+to the start of the section or forward by up to 0x7FF. We do this by adding in a 
+symbol with `PROVIDE(__global_pointer$ = . + 0x800);` right before the small 
+data section. While we're here, let's also add symbols for the start of the data 
+section as a whole, the end of the data section, and the start of the 
+initialized ROM values, found with `LOADADDR(.data)`. Fully marked up, our 
+section now looks like:
+
+```
+.data : ALIGN(4)
+{
+  _sidata = LOADADDR(.data);
+  _sdata = .;
+  *(.data .data.*);
+  /* Must be called __global_pointer$ for linker relaxations to work. */
+  PROVIDE(__global_pointer$ = . + 0x800);
+  *(.sdata .sdata.*);
+  . = ALIGN(4);
+  _edata = .;
+} > BRAM AT > BRAM
+```
+
+Cool, that's the global intialized variables, now for the uninitialized ones. 
+They go in a section called `.bss`, so called for... well, legacy reasons. 
+"Block Started by Symbol" was a command in a 1950s assembler that reserved 
+memory for uninitialized data, and it continues to be called that today. Anyway. 
+The `.bss` section also has it's "small data" sections, called `.sbss`, and we 
+want to put them at the start so they sit directly after the `.sdata` we already 
+have, allowing all our small data to be in one contiguous block. We'll also mark 
+the section with start & end symbols (`_sbss` and `_ebss`, and tell the linker 
+it doesn't load anything, just like we did when we added the stack section. This 
+comes out to looking like so:
+
+```
+.bss (NOLOAD) :
+{
+  _sbss = .;
+  *(.sbss .sbss.*);
+  *(.bss .bss.*);
+  . = ALIGN(4);
+  _ebss = .;
+} > BRAM
+```
+
+Whew! Ok, with those three sections all added to our linker script, we can 
+finally set up the global pointer.
+
+Step 9: Global Variable Setup
+-----------------------------
+
+We set up the global pointer with the following bit of assembly code, inserted 
+into our start routine:
+
+```
+.option push
+.option norelax
+la gp, __global_pointer$
+.option pop
+```
+
+Here, we load in the value of the global pointer based on the linker symbol we 
+set up in the last step. The `.option norelax` tells the compiler/linker that 
+this section can't be shortened by referring to the global pointer when loading 
+this address - we're setting `gp` up, after all! `.option push` & `.option pop` 
+store the assembler's current environment state and restores it after this 
+section. That way, no matter what options we set here, it doesn't disturb the 
+rest of the code.
+
+We're not done setting up our global variables though. We still need to have 
+some code actually load the initial state, and clear out the uninitialized 
+variables to zero. Strictly speaking, we shouldn't have to do the latter, but 
+the impact of bugs and security flaws does tend to be lessened when everything 
+starts off initialized to zero. So we're gonna do it, same as most other 
+programs today.
+
+I was going to suggest using the `r0` crate to do this, which is what `riscv-rt` 
+does, but `r0` has since been deprecated for complicated reasons. They recommend 
+we write our own assembly routine to do initialization, so let's go for it.
 
 Misc Notes
 ----------

@@ -19,6 +19,33 @@ SECTIONS
   }
   > BRAM
 
+  .rodata : ALIGN(4)
+  {
+    *(.rodata .rodata.*);
+    . = ALIGN(4);
+  } > BRAM
+
+  .data : ALIGN(4)
+  {
+    _sidata = LOADADDR(.data);
+    _sdata = .;
+    *(.data .data.*);
+    /* Must be called __global_pointer$ for linker relaxations to work. */
+    PROVIDE(__global_pointer$ = . + 0x800);
+    *(.sdata .sdata.*);
+    . = ALIGN(4);
+    _edata = .;
+  } > BRAM AT > BRAM
+
+  .bss (NOLOAD) :
+  {
+    _sbss = .;
+    *(.sbss .sbss.*);
+    *(.bss .bss.*);
+    . = ALIGN(4);
+    _ebss = .;
+  } > BRAM
+
   /* Our stack */
   .stack (NOLOAD) :
   {
