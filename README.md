@@ -875,9 +875,11 @@ starts off initialized to zero. So we're gonna do it, same as most other
 programs today.
 
 I was going to suggest using the `r0` crate to do this, which is what `riscv-rt` 
-does, but `r0` has since been deprecated for...complicated reasons. They 
-recommend we write our own assembly routine to do initialization, so let's go 
-for it:
+does, but `r0` has since been deprecated for...[complicated reasons][rt0-issue].
+They recommend we write our own assembly routine to do initialization, so let's 
+go for it:
+
+[rt0-issue]: https://github.com/tock/tock/issues/2222
 
 ```assembly
     la t0, _sidata
