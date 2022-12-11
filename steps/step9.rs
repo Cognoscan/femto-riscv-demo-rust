@@ -74,16 +74,5 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 #[link_section = ".init.rust"]
 #[export_name = "_start_rust"]
 pub extern "C" fn start() -> ! {
-    unsafe {
-        let uat_write = 0x40_0008 as *mut u8;
-        let uat_stat = 0x40_0010 as *const u16;
-        loop {
-            UAT_STAT = core::ptr::read_volatile(uat_stat);
-            if UAT_STAT != 0 { break; }
-        }
-        let b = core::ptr::read_volatile(uat_stat) as u8;
-        core::ptr::write_volatile(uat_write, UAT_STAT as u8);
-        UAT_VAL = b;
-    }
     panic!()
 }

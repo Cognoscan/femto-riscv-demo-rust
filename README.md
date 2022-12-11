@@ -11,11 +11,17 @@ written, possibly buggy RISC-V I had from the tutorial (at step 20) here for
 testing - feel free to substitute your own. It has no interrupts, shared 
 program/data memory (1 whole kiB), and has CSR instruction support.
 
+This is *not* a tutorial for just getting going as quickly as possible. I'll be 
+reconstructing a runtime environment for Rust from scratch, and stumbling around 
+along the way. If you want to know everything that goes into making a runtime, 
+this is the tutorial for you.
+
 As a note, before we begin, I'm taking a lot of knowledge and code from the 
 [`riscv-rt`][riscv_rt] crate, which does everything I'm doing here and more 
 besides. One key difference though - we'll be using Rust's `global_asm!` and 
 `asm!` macros to avoid some (but not all) of the annoyances of needing assembly 
-initializer code.
+initializer code. There are a few other deviations I make from `riscv-rt` 
+besides that, which I'll point out as I make them.
 
 [tutorial]: https://github.com/BrunoLevy/learn-fpga/tree/master/FemtoRV/TUTORIALS/FROM_BLINKER_TO_RISCV
 [riscv_rt]: https://docs.rs/riscv-rt/latest/riscv_rt/
@@ -668,6 +674,8 @@ So, amending our start function, we now have:
     .section .init, "ax"
     .global _start
 _start:
+    la sp, _stack_start
+    mv fp, sp
     li tp, 0
     li t0, 0
     li t1, 0
@@ -695,8 +703,6 @@ _start:
     li a5, 0
     li a6, 0
     li a7, 0
-    la sp, _stack_start
-    mv fp, sp
     jal _start_rust
 ```
 
@@ -819,13 +825,34 @@ comes out to looking like so:
 Whew! Ok, with those three sections all added to our linker script, we can 
 finally set up the global pointer.
 
+Oh, before we move on though, I've got some miscellaneous notes about how I 
+ended up with this linker script. First, it deviates from `riscv-rt`.  Their 
+linker script orders the small data differently, such that it goes "sdata - data 
+- sbss - bss" and potentially puts all of the `sbss` section too far away to 
+benefit from the global pointer. We reordered it so that the sdata and sbss 
+should be adjacent or nearly adjacent in memory. I've also purposely skipped 
+including `.sdata2` and `.srodata` because LLVM will never generate those 
+sections - only gcc will, and we're not using gcc. Furthermore, the only 
+documentation I can find on them is forum posts and issue reports, which point 
+to them being some kind of mistake in gcc's codegen for RISC-V. `.sdata2` seems 
+to be related to gcc's PowerPC support, and `.srodata` is supposed to be small 
+read-only data. And they got mixed up at some point. If you *are* using gcc and 
+need `.srodata` and `.sdata2`, I'd recommend sticking them in the `.data` 
+section. The default gcc linker script puts `.srodata` right before `.sdata`, 
+and sticks `.sdata2` in after `.rodata`.
+
+There are plenty of other sections besides these, but Rust/LLVM won't generate 
+them so I'm not going to worry about it. If you include C++ libraries as part of 
+your build, be aware you probably will need to add more sections (like `ctors` 
+and `dtors` and others).
+
 Step 9: Global Variable Setup
 -----------------------------
 
 We set up the global pointer with the following bit of assembly code, inserted 
 into our start routine:
 
-```
+```assembly
 .option push
 .option norelax
 la gp, __global_pointer$
@@ -848,8 +875,54 @@ starts off initialized to zero. So we're gonna do it, same as most other
 programs today.
 
 I was going to suggest using the `r0` crate to do this, which is what `riscv-rt` 
-does, but `r0` has since been deprecated for complicated reasons. They recommend 
-we write our own assembly routine to do initialization, so let's go for it.
+does, but `r0` has since been deprecated for...complicated reasons. They 
+recommend we write our own assembly routine to do initialization, so let's go 
+for it:
+
+```assembly
+    la t0, _sidata
+    la t1, _sdata
+    la t2, _edata
+    beq t1, t2, 101f
+100: // loop for data
+    lw t3, 0(t0)
+    sw t3, 0(t1)
+    addi t0, t0, 4
+    addi t1, t1, 4
+    bne t1, t2, 100b
+101: // end of loop for data
+    la t1, _sbss
+    la t2, _ebss
+    beq t1, t2, 201f
+200: // loop for bss
+    sw zero, 0(t1)
+    addi t1, t1, 4
+    bne t1, t2, 200b
+201: // end of loop for bss
+```
+
+This loads in our data's start & end addresses, as well as the address of the 
+initial data to load. Before looping, we check that there's data to load, then 
+we run through the loop of loading & storing data. We put our backward branch at 
+the end because that saves us an instruction within the loop. I'm just pointing 
+that out because I've seen other loops that put the check at the top and an 
+unconditional jump at the end, and there's no reason to do so.
+
+The BSS section is the same, just without initial nonzero data. We just stick 
+zeros into the memory instead.
+
+Something else to not: the 100/101/200/201 labels are all local labels - they 
+only have meaning within this one section, and the "f" and "b" in our branches 
+indicate if the assembler should search forward or backward when looking for the 
+nearest local label.
+
+So, with that, we should be all done initializing the global variables. 
+Aaaaaaaaaand with that, we're also done with all the setup that Rust needs to 
+run without issue! We've made a *runtime*! ...Well, we don't have a trap handler 
+or support for Rust's `alloc` or anything of that nature, but that's OK because 
+this little CPU doesn't have any traps, and it's certainly not large enough for 
+us to bother with a heap just yet. We're at a state where we can start writing 
+Rust programs for this little toy RISC-V processor!
 
 Misc Notes
 ----------
@@ -892,4 +965,14 @@ preprocessor defines (if we're inside an assembly code section):
 - `__riscv_fdiv`: defined when targeting the 'F' or 'D' ISA extensions and -mno-fdiv has not been used.
 - `__riscv_fsqrt`: defined when targeting the 'F' or 'D' ISA extensions and -mno-fdiv has not been used.
 - `__riscv_compressed`: defined when targeting the 'C' ISA extension.
+
+Useful Links
+------------
+
+- [The Rust Assembly Macro documentation](https://doc.rust-lang.org/nightly/reference/inline-assembly.html)
+- [RISC-V Non-ISA Documents](https://github.com/riscv-non-isa/riscv-elf-psabi-doc/)
+	- [RISC-V Toolchain conventions](https://github.com/riscv-non-isa/riscv-toolchain-conventions)
+	- [RISC-V Assembly Programmer's Manual](https://github.com/riscv-non-isa/riscv-asm-manual/blob/master/riscv-asm.md)
+	- [RISC-V Supervisor Binary Interface](https://github.com/riscv-non-isa/riscv-sbi-doc/releases/download/v1.0.0/riscv-sbi.pdf)
+
 
